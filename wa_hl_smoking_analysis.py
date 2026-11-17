@@ -6,11 +6,14 @@ Complete analysis code for the revised manuscript (PLOS ONE, PONE-D-26-31483).
 Usage:
     python wa_hl_smoking_analysis.py <path to analytic data .xlsx> [output folder]
 
+Model names: CORE = M3 (main model); EXT = M4 (extended model).
+
 Requirements: Python >= 3.10, numpy, pandas, scipy, matplotlib, openpyxl.
 All statistical methods are implemented in cr2_methods.py (same folder).
 
 Outputs (in the output folder):
     results.json   all estimates used in the manuscript, tables and Supporting Information
+                   (key 'S6' holds the full regression results for M3 and M4, S6 Table)
     results.txt    readable log of the same results
     S3_Fig.png     restricted cubic spline curves for health literacy
 """
@@ -77,8 +80,8 @@ d['ftnd_sev'] = np.select([d.FTND_total <= 3, d.FTND_total <= 6], [0, 1], 2)   #
 
 M1 = ['age', 'male']
 M2 = M1+['edu_prim', 'edu_mid']
-CORE = M2+['loginc', 'farmer', 'married']                     # main model (confounders)
-EXT = CORE+['drink', 'BMI', 'PHQ_total', 'GAD_total', 'chronic']   # extended model (former M4)
+CORE = M2+['loginc', 'farmer', 'married']                     # M3 (main model): confounders
+EXT = CORE+['drink', 'BMI', 'PHQ_total', 'GAD_total', 'chronic']   # M4 (extended model)
 
 ever = d.copy(); ever['y'] = ever.ever
 cur = d[d.ever == 1].copy(); cur['y'] = cur.current
@@ -230,7 +233,58 @@ for lab, dd, fam in [('ever', ever, 'poisson'), ('current', cur, 'poisson'), ('f
     keep(f'S5_{lab}_between', glm_contrast(dd2.y.values, X, dd2.village.values, fam, e_j(X.shape[1], 2), expo=ex))
 
 # =====================================================================
-# 8. S3 Fig: spline curves (reference = median score)
+# 8. Full regression results for M3 (main) and M4 (extended) (S6 Table)
+#    all covariates: beta, SE, 95% CI, p value and fit measures
+# =====================================================================
+log('\n=== S6 Table: full regression results ===')
+from cr2_methods import _ord_ll
+
+def full_binary(dd, cols):
+    """modified Poisson regression, CR2 variance with Satterthwaite df, every term"""
+    X = Xmat(dd, cols); y = dd.y.values; cl = dd.village.values
+    b, Xt, rt = fit_glm(y, X, 'poisson')
+    rows = []
+    for j, nm in enumerate(['intercept', 'hl5']+cols):
+        est, se, df = cr2(b, Xt, rt, cl, e_j(X.shape[1], j))
+        rows.append(dict(term=nm, beta=est, se=se, **ci(est, se, df)))
+    eta = X @ b
+    return dict(rows=rows, n=len(dd), cases=int(y.sum()), clusters=int(dd.village.nunique()),
+                log_pseudolik=float(np.sum(y*eta-np.exp(eta))))
+
+def full_ordinal(df, cols):
+    """proportional-odds model, cluster-robust (CR1) variance with t(G-1), every term;
+    covariates are centred at their means, so thresholds refer to a participant with mean values"""
+    X = ordX(df, cols); y = df.ftnd_sev.values; cl = df.village.values
+    th, Ai, S, K = fit_ordinal(X, y)
+    groups = pd.unique(cl); G = len(groups)
+    Mm = sum(np.outer(S[cl == g].sum(0), S[cl == g].sum(0)) for g in groups)
+    V = Ai @ Mm @ Ai*G/(G-1); dfr = G-1
+    rows = []
+    for j, nm in enumerate(['hl5']+cols):
+        i = K-1+j; est, se = th[i], np.sqrt(V[i, i])
+        rows.append(dict(term=nm, beta=est, se=se, **ci(est, se, dfr)))
+    g1 = np.zeros(len(th)); g1[0] = 1.                       # threshold 1 = theta0
+    g2 = np.zeros(len(th)); g2[0] = 1.; g2[1] = np.exp(th[1])  # threshold 2 = theta0 + exp(theta1)
+    for nm, est, gv in [('threshold_low_moderate', th[0], g1), ('threshold_moderate_high', th[0]+np.exp(th[1]), g2)]:
+        se = float(np.sqrt(gv @ V @ gv))
+        rows.append(dict(term=nm, beta=est, se=se, **ci(est, se, dfr, expo=False)))
+    ll = float(_ord_ll(th, X, y, K).sum())
+    return dict(rows=rows, n=len(df), clusters=G, loglik=ll, aic=2*len(th)-2*ll,
+                categories={c: int((y == i).sum()) for i, c in enumerate(['low', 'moderate', 'high'])})
+
+R['S6'] = {}
+for lab, dd in [('ever', ever), ('current', cur)]:
+    for mn, cols in [('M3', CORE), ('M4', EXT)]:
+        R['S6'][f'{lab}_{mn}'] = full_binary(dd, cols)
+for mn, cols in [('M3', CORE), ('M4', EXT)]:
+    R['S6'][f'ftnd_{mn}'] = full_ordinal(cs, cols)
+for k, v in R['S6'].items():
+    log(k, {kk: vv for kk, vv in v.items() if kk != 'rows'})
+    for r in v['rows']:
+        log(f"   {r['term']:<26} beta={r['beta']: .4f} se={r['se']:.4f} est={r['est']:.3f} [{r['lo']:.3f}, {r['hi']:.3f}] p={r['p']:.3f} df={r['df']:.1f}")
+
+# =====================================================================
+# 9. S3 Fig: spline curves (reference = median score)
 # =====================================================================
 import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
 fig, axes = plt.subplots(1, 2, figsize=(9, 3.8), dpi=300)
